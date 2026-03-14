@@ -1,5 +1,5 @@
-<<<<<<< HEAD
-# NEDAMS v2.0 — Nakawa East Digital Addressing & Mapping System
+<< HEAD
+# NEDAMS v2.1.0 — Nakawa East Digital Addressing & Mapping System
 
 **Enterprise-grade digital addressing system for informal settlements in Kampala, Uganda.**
 
