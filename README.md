@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # NEDAMS v2.0 — Nakawa East Digital Addressing & Mapping System
 
 **Enterprise-grade digital addressing system for informal settlements in Kampala, Uganda.**
@@ -299,3 +300,8 @@ Password: Admin@1234
 ## License
 
 NEDAMS is developed for Nakawa East Digital Addressing Initiative, Kampala, Uganda.
+=======
+# NEDAMS
+Digital Addressing System (PROJECT IV)
+Enhancing Urban Navigation and Service Delivery through Geospatial Identification in Informal Settlements.
+>>>>>>> ebccfb860751d6666a5c3783787d2257f8e5557b
