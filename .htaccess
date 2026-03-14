@@ -1,0 +1,72 @@
+Options -Indexes
+ServerSignature Off
+
+# ============================================================
+# SECURITY HEADERS
+# ============================================================
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# ============================================================
+# BLOCK DIRECT ACCESS TO SENSITIVE FILES
+# ============================================================
+<FilesMatch "\.(sql|log|env|ini|bak|sh)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# ============================================================
+# URL REWRITING — clean share URLs routed through index.php
+# Only the /s/ /a/ /p/ patterns are rewritten.
+# All other requests (login, dashboard, API, etc.) are NOT
+# touched — they pass through to their actual files normally.
+# ============================================================
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /nedams/
+
+    # Block direct HTTP access to sensitive directories
+    RewriteRule ^(config|models|database|lib)/ - [F,L]
+
+    # /s/{32-hex-token}  →  address card (opaque share link)
+    RewriteRule ^s/([a-f0-9]{32})/?$ index.php?_r=share&token=$1 [L,QSA]
+
+    # /a/{CODE}  →  address card (short human-readable link)
+    RewriteRule ^a/([A-Z0-9]{4,16})/?$ index.php?_r=address&code=$1 [L,QSA,NC]
+
+    # /p/{32-hex-token}  →  PDF card
+    RewriteRule ^p/([a-f0-9]{32})/?$ index.php?_r=pdf&token=$1 [L,QSA]
+</IfModule>
+
+# ============================================================
+# PHP SETTINGS
+# ============================================================
+<IfModule mod_php8.c>
+    php_value upload_max_filesize 10M
+    php_value post_max_size 10M
+    php_value session.use_strict_mode 1
+    php_value session.cookie_httponly 1
+</IfModule>
+<IfModule mod_php.c>
+    php_value upload_max_filesize 10M
+    php_value post_max_size 10M
+    php_value session.use_strict_mode 1
+    php_value session.cookie_httponly 1
+</IfModule>
+
+# ============================================================
+# COMPRESSION & CACHING
+# ============================================================
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json
+</IfModule>
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css               "access plus 7 days"
+    ExpiresByType application/javascript "access plus 7 days"
+    ExpiresByType image/svg+xml          "access plus 30 days"
+    ExpiresByType image/png              "access plus 30 days"
+</IfModule>

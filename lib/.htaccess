@@ -1,0 +1,4 @@
+# lib/.htaccess — Block all direct web access to this directory.
+# Files here are only accessible via PHP include/require.
+Order deny,allow
+Deny from all
