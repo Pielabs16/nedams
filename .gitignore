@@ -1,0 +1,36 @@
+# ============================================================
+# NEDAMS .gitignore
+# ============================================================
+
+# !! CRITICAL — Credential file must NEVER be committed !!
+config/env.php
+
+# Logs
+*.log
+logs/
+/tmp/
+
+# System / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled / generated
+*.min.js.map
+*.min.css.map
+
+# PHPMailer (user installs separately)
+lib/phpmailer/
+
+# Backups
+*.bak
+*.sql.gz
+
+# Local environment overrides
+.env
+.env.local
+*.env

@@ -1,17 +1,34 @@
 <?php
 // ============================================================
 // config/app.php  — NEDAMS v2.1
+// Credentials loaded from config/env.php (never committed).
 // ============================================================
 
 define('NEDAMS_VERSION', '2.1.0');
 define('BCRYPT_COST',    12);
 define('SESSION_NAME',   'nedams_sess');
-define('DB_HOST',   'localhost');
-define('DB_PORT',   '3306');
-define('DB_NAME',   'nedams');
-define('DB_USER',   'root');
-define('DB_PASS',   '');
-define('DB_CHARSET','utf8mb4');
+
+// ---- Load credentials from env.php -------------------------
+// env.php is in .gitignore — never committed to version control.
+$_envPath = __DIR__ . '/env.php';
+if (file_exists($_envPath)) {
+    require_once $_envPath;
+} else {
+    // Fallback for first-run / CI — all blank, system prompts setup
+    define('DB_HOST',    'localhost');
+    define('DB_PORT',    '3306');
+    define('DB_NAME',    'nedams');
+    define('DB_USER',    'root');
+    define('DB_PASS',    '');
+    define('DB_CHARSET', 'utf8mb4');
+    define('APP_KEY',    'INSECURE_DEFAULT_CHANGE_IN_env.php');
+    define('SMTP_HOST',  '');
+    define('SMTP_PORT',  587);
+    define('SMTP_USER',  '');
+    define('SMTP_PASS',  '');
+    define('SMTP_FROM',  '');
+    define('SMTP_FROM_NAME', 'NEDAMS');
+}
 
 // ---- PDO singleton ------------------------------------------
 function getDB(): PDO {
@@ -78,18 +95,164 @@ function gmapsKey(): string  { return setting('maps.gmaps_api_key',''); }
 
 // ---- Session -----------------------------------------------
 function startSession(): void {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_name(SESSION_NAME);
-        $lifetime = (int) setting('security.session_lifetime', 7200);
-        session_set_cookie_params([
-            'lifetime' => $lifetime,
-            'path'     => '/',
-            'secure'   => isset($_SERVER['HTTPS']),
-            'httponly' => true,
-            'samesite' => 'Lax',
-        ]);
-        session_start();
+    if (session_status() !== PHP_SESSION_NONE) return;
+
+    // Determine if request is over HTTPS
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || ($_SERVER['SERVER_PORT'] ?? 80) == 443
+            || (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+
+    // Force HTTPS redirect if enabled in settings (skip for CLI)
+    if (PHP_SAPI !== 'cli' && !$isHttps) {
+        try {
+            if (settingBool('security.force_https', false)) {
+                $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+                $uri  = $_SERVER['REQUEST_URI'] ?? '/';
+                header('Location: https://' . $host . $uri, true, 301);
+                exit;
+            }
+        } catch (Throwable $e) {} // settings table may not exist yet on first install
     }
+
+    session_name(SESSION_NAME);
+
+    // ---- Hardened cookie parameters ----
+    // Idle timeout from settings (default 15 minutes = 900 sec)
+    $idleTimeout = max(300, (int)(function_exists('setting') ? setting('security.idle_timeout', 900) : 900));
+
+    session_set_cookie_params([
+        'lifetime' => 0,             // Session cookie — expires on browser close
+        'path'     => '/',
+        'domain'   => '',            // Current domain only
+        'secure'   => $isHttps,      // HTTPS only when on HTTPS
+        'httponly' => true,          // No JS access — blocks XSS cookie theft
+        'samesite' => 'Strict',      // Blocks CSRF via cross-site requests
+    ]);
+
+    // Use high-entropy session IDs (PHP default is 26 chars; force 48 hex = 192 bits)
+    ini_set('session.entropy_length',      48);
+    ini_set('session.hash_function',       'sha256');
+    ini_set('session.use_strict_mode',     '1'); // Reject unrecognised session IDs
+    ini_set('session.use_only_cookies',    '1'); // Never accept SID in URL
+    ini_set('session.use_trans_sid',       '0');
+    ini_set('session.cookie_httponly',     '1');
+    ini_set('session.cookie_samesite',     'Strict');
+    ini_set('session.gc_maxlifetime',      (string)$idleTimeout);
+
+    session_start();
+
+    // ---- Add HSTS header if enabled ----
+    try {
+        if ($isHttps && settingBool('security.enable_hsts', false)) {
+            header('Strict-Transport-Security: max-age=31536000; includeSubDomains; preload');
+        }
+    } catch (Throwable $e) {}
+
+    // ---- Idle timeout enforcement ----
+    if (isset($_SESSION['user_id'])) {
+        $now       = time();
+        $lastSeen  = (int)($_SESSION['_last_active'] ?? 0);
+        $absExpiry = (int)($_SESSION['_abs_expiry']  ?? 0);
+
+        // Idle: no activity for $idleTimeout seconds
+        if ($lastSeen && ($now - $lastSeen) > $idleTimeout) {
+            _destroySession('idle_timeout');
+            return;
+        }
+
+        // Absolute: session older than absolute_timeout regardless of activity
+        $absTimeout = max(3600, (int)(function_exists('setting') ? setting('security.absolute_timeout', 18000) : 18000));
+        if ($absExpiry && $now > $absExpiry) {
+            _destroySession('absolute_timeout');
+            return;
+        }
+
+        // ---- Session binding: IP + User-Agent ----
+        try {
+            if (settingBool('security.session_binding', true)) {
+                $currentFingerprint = _sessionFingerprint();
+                if (isset($_SESSION['_fingerprint']) && !hash_equals($_SESSION['_fingerprint'], $currentFingerprint)) {
+                    // Fingerprint changed — possible session hijack
+                    auditLog('session_hijack_attempt', 'security', 'session',
+                        (string)$_SESSION['user_id'],
+                        'Session fingerprint mismatch — session terminated');
+                    _destroySession('fingerprint_mismatch');
+                    return;
+                }
+            }
+        } catch (Throwable $e) {}
+
+        $_SESSION['_last_active'] = $now;
+    }
+}
+
+// ---- Compute session fingerprint (IP + UA hash) ------------
+function _sessionFingerprint(): string {
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    return hash_hmac('sha256', $ip . '|' . substr($ua, 0, 256), APP_KEY);
+}
+
+// ---- Destroy session cleanly --------------------------------
+function _destroySession(string $reason = ''): void {
+    if (isset($_SESSION['user_id']) && $reason) {
+        try {
+            auditLog('session_expired', 'security', 'session',
+                (string)$_SESSION['user_id'], 'Session terminated: ' . $reason);
+            // Revoke in registry
+            getDB()->prepare(
+                "UPDATE session_registry SET is_active=0, revoked_reason=?
+                 WHERE session_token=? AND user_id=?"
+            )->execute([$reason, $_SESSION['_session_token'] ?? '', $_SESSION['user_id']]);
+        } catch (Throwable $e) {}
+    }
+    $msg = match($reason) {
+        'idle_timeout'       => 'Your session expired due to inactivity. Please sign in again.',
+        'absolute_timeout'   => 'Your session has exceeded the maximum duration. Please sign in again.',
+        'fingerprint_mismatch' => 'Security alert: your session was invalidated. Please sign in again.',
+        default              => 'Your session has ended. Please sign in again.',
+    };
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $p = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 86400,
+            $p['path'], $p['domain'], $p['secure'], $p['httponly']);
+    }
+    session_destroy();
+    session_start();
+    session_name(SESSION_NAME);
+    $_SESSION['flash'] = ['type' => 'warning', 'message' => $msg];
+}
+
+// ---- Register new session in session_registry --------------
+function registerSession(int $userId): string {
+    $token    = bin2hex(random_bytes(32)); // 256-bit token
+    $absLimit = time() + max(3600, (int)setting('security.absolute_timeout', 18000));
+    try {
+        getDB()->prepare(
+            'INSERT INTO session_registry
+             (session_token, user_id, ip_address, user_agent_hash, absolute_expiry)
+             VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))'
+        )->execute([
+            $token,
+            $userId,
+            $_SERVER['REMOTE_ADDR'] ?? '',
+            hash('sha256', $_SERVER['HTTP_USER_AGENT'] ?? ''),
+            $absLimit,
+        ]);
+        // Enforce concurrent session limit
+        $limit = (int)setting('security.concurrent_session_limit', 3);
+        if ($limit > 0) {
+            getDB()->prepare(
+                "UPDATE session_registry
+                 SET is_active=0, revoked_reason='concurrent_limit'
+                 WHERE user_id=? AND is_active=1 AND session_token != ?
+                 ORDER BY last_active ASC
+                 LIMIT " . max(0, $limit - 1)
+            )->execute([$userId, $token]);
+        }
+    } catch (Throwable $e) {}
+    return $token;
 }
 
 // ---- Auth guards -------------------------------------------
@@ -144,6 +307,142 @@ function canAccessNav(string $navKey): bool {
     // super_admin always has access
     if (($_SESSION['role']??'') === 'super_admin') return true;
     return $perms[$navKey] ?? false;
+}
+
+// ---- Risk-Based Authentication (RBA) -----------------------
+
+/**
+ * Assess login risk. Returns array with:
+ *   risk_level: 'low' | 'medium' | 'high'
+ *   reasons:    array of human-readable risk signals
+ *   challenge:  bool — should we issue an extra challenge?
+ */
+function assessLoginRisk(int $userId, string $ip, string $ua): array {
+    if (!settingBool('security.enable_rba', true)) {
+        return ['risk_level' => 'low', 'reasons' => [], 'challenge' => false];
+    }
+    $reasons = [];
+    $score   = 0;
+    $pdo     = getDB();
+
+    // 1. New IP address?
+    if (settingBool('security.rba_on_new_ip', true)) {
+        $stmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM login_attempts
+             WHERE email=(SELECT email FROM users WHERE id=? LIMIT 1)
+               AND ip_address=? AND status='success'"
+        );
+        $stmt->execute([$userId, $ip]);
+        if ((int)$stmt->fetchColumn() === 0) {
+            $reasons[] = 'Login from a new IP address (' . htmlspecialchars($ip) . ')';
+            $score += 40;
+        }
+    }
+
+    // 2. New device / user-agent hash?
+    if (settingBool('security.rba_on_new_device', true)) {
+        $uaHash = hash('sha256', substr($ua, 0, 512));
+        $stmt   = $pdo->prepare(
+            "SELECT COUNT(*) FROM session_registry
+             WHERE user_id=? AND user_agent_hash=? AND is_active=0
+             LIMIT 1"
+        );
+        $stmt->execute([$userId, $uaHash]);
+        // Also check login_attempts for historic successful logins from this UA
+        $stmt2 = $pdo->prepare(
+            "SELECT COUNT(*) FROM login_attempts
+             WHERE email=(SELECT email FROM users WHERE id=? LIMIT 1)
+               AND user_agent=? AND status='success'"
+        );
+        $stmt2->execute([$userId, substr($ua, 0, 512)]);
+        if ((int)$stmt2->fetchColumn() === 0) {
+            $reasons[] = 'Login from an unrecognised device or browser';
+            $score += 35;
+        }
+    }
+
+    // 3. Unusual hour? (midnight–5am Kampala time)
+    $hour = (int)date('G', time());
+    if ($hour >= 0 && $hour < 5) {
+        $reasons[] = 'Login at unusual hour (' . date('H:i') . ' local time)';
+        $score += 15;
+    }
+
+    // 4. High recent failure rate from this IP?
+    $stmt = $pdo->prepare(
+        "SELECT COUNT(*) FROM login_attempts
+         WHERE ip_address=? AND status='fail'
+           AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)"
+    );
+    $stmt->execute([$ip]);
+    $recentFails = (int)$stmt->fetchColumn();
+    if ($recentFails >= 3) {
+        $reasons[] = 'Multiple recent failed attempts from this IP';
+        $score += 20;
+    }
+
+    $level = $score >= 60 ? 'high' : ($score >= 30 ? 'medium' : 'low');
+    return [
+        'risk_level' => $level,
+        'reasons'    => $reasons,
+        'challenge'  => $score >= 30 && !empty($reasons),
+        'score'      => $score,
+    ];
+}
+
+/** Issue an RBA challenge OTP and return the challenge ID */
+function issueRbaChallenge(int $userId, string $email, string $ip, string $ua, array $reasons): int {
+    $code     = (string)random_int(100000, 999999);
+    $hash     = password_hash($code, PASSWORD_BCRYPT, ['cost' => 10]);
+    $reason   = implode('; ', array_slice($reasons, 0, 3));
+    $expires  = date('Y-m-d H:i:s', time() + 900); // 15 min
+
+    // Invalidate any prior challenges for this user
+    getDB()->prepare("UPDATE rba_challenges SET used=1 WHERE user_id=? AND used=0")
+           ->execute([$userId]);
+
+    $stmt = getDB()->prepare(
+        'INSERT INTO rba_challenges
+         (user_id, email, code_hash, ip_address, user_agent, risk_reason, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    $stmt->execute([$userId, $email, $hash, $ip, substr($ua, 0, 512), $reason, $expires]);
+    $challengeId = (int)getDB()->lastInsertId();
+
+    // Send OTP email
+    sendMail($email, $email, 'NEDAMS Security Verification',
+        '<p>A login to your NEDAMS account was flagged for security review.</p>
+         <p><strong>Reason:</strong> ' . htmlspecialchars($reason) . '</p>
+         <p>Your verification code is: <strong style="font-size:1.4em;letter-spacing:.1em">' . $code . '</strong></p>
+         <p>This code expires in 15 minutes. If you did not attempt to login, please contact your administrator immediately.</p>',
+        "NEDAMS Security Verification\n\nVerification code: $code\nExpires in 15 minutes.\nReason: $reason"
+    );
+
+    return $challengeId;
+}
+
+/** Verify an RBA challenge code. Returns true on success. */
+function verifyRbaChallenge(int $challengeId, string $code): bool {
+    $stmt = getDB()->prepare(
+        'SELECT * FROM rba_challenges WHERE id=? AND used=0 AND expires_at > NOW() LIMIT 1'
+    );
+    $stmt->execute([$challengeId]);
+    $row = $stmt->fetch();
+    if (!$row) return false;
+
+    // Increment attempt counter
+    getDB()->prepare('UPDATE rba_challenges SET attempts=attempts+1 WHERE id=?')
+           ->execute([$challengeId]);
+
+    if ($row['attempts'] >= 5) {
+        getDB()->prepare('UPDATE rba_challenges SET used=1 WHERE id=?')->execute([$challengeId]);
+        return false;
+    }
+
+    if (!password_verify($code, $row['code_hash'])) return false;
+
+    getDB()->prepare('UPDATE rba_challenges SET used=1 WHERE id=?')->execute([$challengeId]);
+    return true;
 }
 
 // ---- Password validation -----------------------------------

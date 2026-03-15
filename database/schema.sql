@@ -287,6 +287,66 @@ CREATE TABLE IF NOT EXISTS zones (
     CONSTRAINT fk_zone_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================
+-- LOGIN ATTEMPTS  (rate limiting + RBA fingerprinting)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id           INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    email        VARCHAR(180)  NOT NULL,
+    ip_address   VARCHAR(45)   NOT NULL,
+    user_agent   VARCHAR(512)  DEFAULT NULL,
+    status       ENUM('success','fail','locked','rba_challenge') NOT NULL DEFAULT 'fail',
+    country_code VARCHAR(4)    DEFAULT NULL,
+    city         VARCHAR(80)   DEFAULT NULL,
+    created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_la_email  (email),
+    KEY idx_la_ip     (ip_address),
+    KEY idx_la_date   (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- SESSION REGISTRY  (active session tracking + binding)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS session_registry (
+    id             INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    session_token  VARCHAR(64)   NOT NULL,
+    user_id        INT UNSIGNED  NOT NULL,
+    ip_address     VARCHAR(45)   NOT NULL,
+    user_agent_hash VARCHAR(64)  NOT NULL,
+    created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_active    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    absolute_expiry DATETIME     NOT NULL,
+    is_active      TINYINT(1)   NOT NULL DEFAULT 1,
+    revoked_reason VARCHAR(80)   DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_session_token (session_token),
+    KEY idx_sr_user    (user_id),
+    KEY idx_sr_active  (is_active),
+    CONSTRAINT fk_sr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- RBA CHALLENGES  (risk-based auth extra verification codes)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS rba_challenges (
+    id           INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+    user_id      INT UNSIGNED  NOT NULL,
+    email        VARCHAR(180)  NOT NULL,
+    code_hash    VARCHAR(255)  NOT NULL,
+    ip_address   VARCHAR(45)   NOT NULL,
+    user_agent   VARCHAR(512)  DEFAULT NULL,
+    risk_reason  VARCHAR(200)  DEFAULT NULL,
+    attempts     TINYINT       NOT NULL DEFAULT 0,
+    used         TINYINT(1)    NOT NULL DEFAULT 0,
+    expires_at   DATETIME      NOT NULL,
+    created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_rba_user   (user_id),
+    KEY idx_rba_email  (email),
+    CONSTRAINT fk_rba_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SET foreign_key_checks = 1;
 
 -- ============================================================
@@ -330,6 +390,15 @@ INSERT INTO settings (`group`, `key`, `value`, type, label, description, is_publ
 ('security',   'password_require_special','1',                     'boolean', 'Require Special Character', 'Password must contain ! @ # $ etc',         0),
 ('security',   'password_require_upper', '1',                      'boolean', 'Require Uppercase Letter',  'Password must contain A-Z',                 0),
 ('security',   'password_require_lower', '1',                      'boolean', 'Require Lowercase Letter',  'Password must contain a-z',                 0),
+('security',   'idle_timeout',          '900',                     'integer', 'Idle Timeout (sec)',        'Auto-logout after inactivity (default 15 min)', 0),
+('security',   'absolute_timeout',      '18000',                   'integer', 'Absolute Timeout (sec)',   'Force re-login after this duration (5 hours)',  0),
+('security',   'enable_rba',            '1',                       'boolean', 'Risk-Based Authentication','Challenge suspicious logins with extra OTP',    0),
+('security',   'rba_on_new_ip',         '1',                       'boolean', 'Challenge New IP',         'RBA triggers when login comes from new IP',     0),
+('security',   'rba_on_new_device',     '1',                       'boolean', 'Challenge New Device',     'RBA triggers when user agent hash changes',     0),
+('security',   'enable_hsts',           '0',                       'boolean', 'Enable HSTS Header',       'HTTP Strict Transport Security (enable in production on HTTPS)', 0),
+('security',   'force_https',           '0',                       'boolean', 'Force HTTPS Redirect',     'Redirect all HTTP requests to HTTPS (enable in production)', 0),
+('security',   'session_binding',       '1',                       'boolean', 'Session IP/UA Binding',    'Invalidate session if IP or browser changes',   0),
+('security',   'concurrent_session_limit','3',                     'integer', 'Max Concurrent Sessions',  'Maximum simultaneous active sessions per user', 0),
 ('workflow',   'allow_self_register', '1',                         'boolean', 'Allow Self-Registration',   'Public registration form enabled',  0),
 ('workflow',   'default_role',        'viewer',                    'string',  'Default User Role',         'Role auto-assigned to new accounts',0),
 ('workflow',   'registration_note',   'You are registering as a community mapper for the NEDAMS Digital Addressing System. Your account will be reviewed before activation.', 'textarea', 'Registration Notice', 'Message shown on registration form', 0);

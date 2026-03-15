@@ -34,6 +34,27 @@ $modules = $pdo->query('SELECT DISTINCT module FROM audit_log WHERE module IS NO
 
 $pageTitle='Audit Log';
 require_once __DIR__.'/../partials/head.php';
+
+// ---- Anomaly detection: count suspicious events in last 24h ----
+try {
+    $anomalies = $pdo->query(
+        "SELECT action, COUNT(*) AS cnt
+         FROM audit_log
+         WHERE action IN (
+             'rba_challenge_issued','rba_challenge_failed',
+             'session_hijack_attempt','session_expired',
+             'login_failed','account_locked'
+         )
+         AND created_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+         GROUP BY action"
+    )->fetchAll();
+    $recentRba = $pdo->query(
+        "SELECT email, ip_address, description, created_at
+         FROM audit_log
+         WHERE action IN ('rba_challenge_issued','session_hijack_attempt')
+         ORDER BY created_at DESC LIMIT 5"
+    )->fetchAll();
+} catch(Throwable $e) { $anomalies = []; $recentRba = []; }
 ?>
 <div class="app-wrapper">
 <?php require_once __DIR__.'/../partials/sidebar.php'; ?>
@@ -46,7 +67,57 @@ require_once __DIR__.'/../partials/head.php';
         <h1>Audit Log</h1>
         <p>Complete record of all system actions — <?= number_format($total) ?> entries</p>
     </div>
+    <div class="page-header-actions">
+        <a href="?module=security" class="btn btn-ghost">
+            <i class="fas fa-shield-halved"></i> Security Events
+        </a>
+    </div>
 </div>
+
+<?php if ($anomalies): ?>
+<!-- Anomaly Detection Panel -->
+<div class="alert alert-warning mb-3">
+    <i class="fas fa-triangle-exclamation" style="flex-shrink:0;margin-top:2px"></i>
+    <div style="flex:1">
+        <strong>Security anomalies detected in the last 24 hours:</strong>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">
+            <?php
+            $labels = [
+                'rba_challenge_issued'   => ['RBA Challenges Issued',     'badge-warning'],
+                'rba_challenge_failed'   => ['RBA Failures',              'badge-danger'],
+                'session_hijack_attempt' => ['Hijack Attempts',           'badge-danger'],
+                'session_expired'        => ['Session Timeouts',          'badge-dark'],
+                'login_failed'           => ['Login Failures',            'badge-danger'],
+                'account_locked'         => ['Account Lockouts',          'badge-danger'],
+            ];
+            foreach ($anomalies as $a):
+                [$lbl, $cls] = $labels[$a['action']] ?? [ucfirst($a['action']), 'badge-dark'];
+            ?>
+            <span class="badge <?= $cls ?>">
+                <?= (int)$a['cnt'] ?> <?= $lbl ?>
+            </span>
+            <?php endforeach; ?>
+        </div>
+        <?php if ($recentRba): ?>
+        <details style="margin-top:8px;font-size:.79rem">
+            <summary style="cursor:pointer;color:var(--warning);font-weight:600">
+                View recent suspicious events
+            </summary>
+            <table style="width:100%;margin-top:8px;border-collapse:collapse">
+                <?php foreach($recentRba as $r): ?>
+                <tr style="border-bottom:1px solid rgba(160,92,0,.15)">
+                    <td style="padding:4px 8px;color:#7a4600"><?= htmlspecialchars($r['email']??'—') ?></td>
+                    <td style="padding:4px 8px;color:#7a4600;font-family:monospace;font-size:.76rem"><?= htmlspecialchars($r['ip_address']) ?></td>
+                    <td style="padding:4px 8px;color:#7a4600"><?= htmlspecialchars($r['description']??'') ?></td>
+                    <td style="padding:4px 8px;color:#a07040;font-size:.75rem"><?= date('d M H:i', strtotime($r['created_at'])) ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+        </details>
+        <?php endif; ?>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- Filters -->
 <div class="card mb-3">

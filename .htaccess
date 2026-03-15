@@ -18,6 +18,12 @@ ServerSignature Off
     Deny from all
 </FilesMatch>
 
+# Block direct access to credential and example files
+<FilesMatch "^(env\.php|env\.example\.php|\.gitignore|\.git)">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
 # ============================================================
 # URL REWRITING — clean share URLs routed through index.php
 # Only the /s/ /a/ /p/ patterns are rewritten.

@@ -117,6 +117,19 @@ require_once __DIR__.'/../partials/head.php';
                     </div>
                 </div>
                 <div class="card-body">
+
+                    <?php if ($groupKey === 'security'): ?>
+                    <!-- HTTPS / production warning banner -->
+                    <div class="alert alert-warning mb-3">
+                        <i class="fas fa-triangle-exclamation"></i>
+                        <div>
+                            <strong>Force HTTPS</strong> and <strong>Enable HSTS</strong> should only be
+                            enabled in production when your site is running on a valid SSL certificate.
+                            Enabling these on a local/development environment (e.g. XAMPP without SSL)
+                            will lock you out of the system.
+                        </div>
+                    </div>
+                    <?php endif; ?>
                     <form method="POST">
                         <input type="hidden" name="save_group" value="<?= htmlspecialchars($groupKey) ?>">
 
